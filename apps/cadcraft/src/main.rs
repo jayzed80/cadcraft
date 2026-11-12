@@ -6,8 +6,9 @@
 //! `{"id":1,"method":"cmdline.input","params":{"text":"circle 0,0 5"}}` → `{"id":1,"ok":true,…}`.
 //! See `cadcraft_ui_egui::control` for the methods.
 //!
-//! `CADCRAFT_VSYNC=1` presents with vsync on Linux/BSD, where the default is the low-latency
-//! present mode (`CADCRAFT_VSYNC=0` selects that elsewhere); see `cadcraft_ui_egui::gpu::surface_config`.
+//! `CADCRAFT_VSYNC=1` presents with vsync on Windows, Linux and BSD, where the default is the
+//! low-latency present mode (`CADCRAFT_VSYNC=0` selects that on macOS); see
+//! `cadcraft_ui_egui::gpu::native_presentation`.
 //!
 //! `log` records go to standard error and `<settings dir>/logs/cadcraft.log` (`RUST_LOG` sets the
 //! levels); see [`logging`]. The `CADCRAFT_*` variables are read once, at startup; see [`env`].
@@ -319,10 +320,10 @@ fn main() -> eframe::Result {
     if let Some(list) = &vars.font_fallback {
         cadcraft_engine::fonts::ttf::set_fallback_fonts(list);
     }
-    let surface = cadcraft_ui_egui::gpu::surface_config(vars.vsync, cfg!(all(unix, not(target_os = "macos"))));
+    let (surface, frame_cap) = cadcraft_ui_egui::gpu::native_presentation(vars.vsync, std::env::consts::OS);
     let mut options = eframe::NativeOptions {
-        // The crosshair is drawn by the app: present without a queue on Linux/BSD, where X11
-        // swapchains hold two frames back under vsync (`CADCRAFT_VSYNC=1` restores vsync).
+        // The crosshair is drawn by the app: present without a vsync queue except on macOS
+        // (`CADCRAFT_VSYNC=1` restores vsync), and cap the frame rate in every mode.
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration::default().with_surface_config(surface),
         ..window_options(restores_window())
     };
@@ -407,9 +408,7 @@ fn main() -> eframe::Result {
                 app.session.set_lisp_support_dir(Some(support));
             }
             app.integrated_titlebar = cfg!(target_os = "macos");
-            if surface.present_mode == eframe::wgpu::PresentMode::AutoNoVsync {
-                app.frame_cap = Some(cadcraft_ui_egui::gpu::FrameCap::new(240));
-            }
+            app.frame_cap = frame_cap;
             if let Some(rs) = &cc.wgpu_render_state {
                 app.set_wgpu(rs, eframe::egui_wgpu::depth_format_from_bits(0, STENCIL_BITS));
             }

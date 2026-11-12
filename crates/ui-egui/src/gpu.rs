@@ -42,10 +42,11 @@ const POINT_SIZE: f32 = 1.5;
 /// back is visible as cursor lag. With FIFO (vsync) wgpu asks for one queued frame, but Vulkan
 /// clamps that to the driver's minimum swapchain size, which is three images on X11 (two frames
 /// queued behind the one on screen; Windows DX12 honours one). `low_latency` (the
-/// app passes it on Linux/BSD) prefers a mode that never queues: `AutoNoVsync` picks Immediate,
-/// then Mailbox, then falls back to FIFO, so it is valid on every surface; under a compositor the
-/// compositor still syncs to the display. `vsync` is the `CADCRAFT_VSYNC` override: `1`/`on`
-/// forces FIFO (tear-free without a compositor), `0`/`off` forces the low-latency mode.
+/// app passes it everywhere but macOS, see [`native_presentation`]) prefers a mode that never
+/// queues: `AutoNoVsync` picks Immediate, then Mailbox, then falls back to FIFO, so it is valid on
+/// every surface; under a compositor the compositor still syncs to the display. `vsync` is the
+/// `CADCRAFT_VSYNC` override: `1`/`on` forces FIFO (tear-free without a compositor), `0`/`off`
+/// forces the low-latency mode.
 pub fn surface_config(vsync: Switch, low_latency: bool) -> egui_wgpu::SurfaceConfig {
     let no_vsync = !vsync.or(!low_latency);
     egui_wgpu::SurfaceConfig {
@@ -54,10 +55,10 @@ pub fn surface_config(vsync: Switch, low_latency: bool) -> egui_wgpu::SurfaceCon
     }
 }
 
-/// Frame-rate cap for presenting without vsync. Nothing else paces frames then (on X11; Wayland
-/// still throttles to the compositor), so a 1000 Hz mouse made the app render ~900 frames per
-/// second and keep a CPU core busy. Waiting out the rest of a short minimum interval adds at most
-/// that interval of input age, far less than a vsync queue.
+/// Frame-rate cap, for presenting without vsync or when vsync does not block. Nothing else paces
+/// frames then (on X11; Wayland still throttles to the compositor), so a 1000 Hz mouse made the
+/// app render ~900 frames per second and keep a CPU core busy. Waiting out the rest of a short
+/// minimum interval adds at most that interval of input age, far less than a vsync queue.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Copy, Debug)]
 pub struct FrameCap {
@@ -86,6 +87,29 @@ impl FrameCap {
             std::thread::sleep(wait);
         }
     }
+}
+
+/// The native window's frame-rate cap (see [`FrameCap`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub const MAX_FPS: u32 = 240;
+
+/// How the native window on `os` (`std::env::consts::OS`) presents, and the frame cap that paces
+/// it; `vsync` is the `CADCRAFT_VSYNC` override.
+///
+/// Every platform but macOS defaults to the low-latency mode. Linux/BSD got it for X11's
+/// three-image swapchains (#25). Windows kept FIFO because DX12 honours one queued frame, but
+/// there each frame still waits in `Present` for a vertical blank and is then composited by DWM,
+/// and on integrated graphics the drawn crosshair trailed the mouse badly (#3013). On DX12
+/// `AutoNoVsync` is Immediate (`Present(0, ALLOW_TEARING)`) when the system allows tearing, else
+/// Mailbox (`Present(0)`): a window DWM composites still does not tear. macOS keeps vsync.
+///
+/// The frame cap is installed in every mode: vsync does not always block either. A driver setting
+/// can turn it off (the NVIDIA Control Panel's Vertical sync, Fast Sync; Mesa's `vblank_mode=0`),
+/// and then nothing paced the frames, so the app rendered as fast as the GPU went and starved
+/// input (#2980). While vsync does block, the cap never waits on displays up to [`MAX_FPS`] Hz.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn native_presentation(vsync: Switch, os: &str) -> (egui_wgpu::SurfaceConfig, Option<FrameCap>) {
+    (surface_config(vsync, os != "macos"), Some(FrameCap::new(MAX_FPS)))
 }
 
 /// The wgpu target the app renders into, recorded by [`install`].
@@ -827,6 +851,46 @@ mod tests {
         assert_eq!(cap.wait_at(t0 + Duration::from_millis(14)), Duration::ZERO);
         assert_eq!(cap.wait_at(t0 + Duration::from_millis(18)), Duration::ZERO);
         assert_eq!(FrameCap::new(0).min, Duration::from_secs(1));
+    }
+
+    /// The present mode and frame cap for `os` and a `CADCRAFT_VSYNC` setting.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn presentation(vsync: Switch, os: &str) -> (wgpu::PresentMode, Option<std::time::Duration>) {
+        let (surface, cap) = native_presentation(vsync, os);
+        assert_eq!(surface.desired_maximum_frame_latency, Some(1), "{os} {vsync:?}");
+        (surface.present_mode, cap.map(|c| c.min))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn windows_presents_without_a_vsync_queue_by_default() {
+        use wgpu::PresentMode::{AutoNoVsync, AutoVsync};
+        // #3013: the drawn crosshair trailed the mouse under FIFO on Windows.
+        assert_eq!(presentation(Switch::Default, "windows").0, AutoNoVsync);
+        assert_eq!(presentation(Switch::Off, "windows").0, AutoNoVsync);
+        assert_eq!(presentation(Switch::On, "windows").0, AutoVsync, "CADCRAFT_VSYNC=1 restores vsync");
+        for os in ["linux", "freebsd", "openbsd", "netbsd", "dragonfly"] {
+            assert_eq!(presentation(Switch::Default, os).0, AutoNoVsync, "{os}");
+            assert_eq!(presentation(Switch::Off, os).0, AutoNoVsync, "{os}");
+            assert_eq!(presentation(Switch::On, os).0, AutoVsync, "{os}");
+        }
+        // macOS is unchanged: vsync unless CADCRAFT_VSYNC=0.
+        assert_eq!(presentation(Switch::Default, "macos").0, AutoVsync);
+        assert_eq!(presentation(Switch::On, "macos").0, AutoVsync);
+        assert_eq!(presentation(Switch::Off, "macos").0, AutoNoVsync);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_frame_cap_paces_every_present_mode() {
+        // #2980: with vsync forced off by the driver, presenting under AutoVsync stops blocking;
+        // without a cap the app rendered as fast as the GPU went.
+        let cap = Some(std::time::Duration::from_secs(1) / MAX_FPS);
+        for os in ["windows", "linux", "freebsd", "macos"] {
+            for vsync in [Switch::Default, Switch::On, Switch::Off] {
+                assert_eq!(presentation(vsync, os).1, cap, "{os} {vsync:?}");
+            }
+        }
     }
 
     fn list() -> DisplayList {

@@ -321,7 +321,7 @@ pub struct CadApp {
     /// Counts settled UI passes (one per painted frame; never hidden logic-only ticks or
     /// discarded passes).
     pub ui_frames: u64,
-    /// Caps the frame rate when presenting without vsync (see [`gpu::FrameCap`]).
+    /// Caps the frame rate (see [`gpu::FrameCap`] and [`gpu::native_presentation`]).
     #[cfg(not(target_arch = "wasm32"))]
     pub frame_cap: Option<gpu::FrameCap>,
     /// Language whose interface fonts are installed (`None` until the first frame).

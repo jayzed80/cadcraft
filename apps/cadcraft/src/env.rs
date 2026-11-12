@@ -21,7 +21,7 @@ const FONTFALLBACK: &str = "CADCRAFT_FONTFALLBACK";
 pub(crate) const VARS: &[(&str, &str)] = &[
     (CONFIG_DIR, "the settings folder (logs, autosave, workspace, plotters); empty means no settings folder"),
     (LOCALE, "the interface language, instead of the system's"),
-    (VSYNC, "1 presents with vsync, 0 without it (default: without on Linux and BSD)"),
+    (VSYNC, "1 presents with vsync, 0 without it (default: with it on macOS, without it elsewhere)"),
     (WAYLAND, "1 keeps the native Wayland backend instead of XWayland; 0 or unset is off"),
     (NO_NATIVE_MENU, "macOS: 1 keeps the menus inside the window; 0 or unset is off"),
     (SYSTEM_CURSOR, "1 uses the system cursor instead of the drawn crosshair; 0 or unset is off"),
@@ -40,7 +40,7 @@ pub(crate) struct Env {
     pub(crate) config_dir: Option<PathBuf>,
     /// The interface language, instead of the system's.
     pub(crate) locale: Option<String>,
-    /// Present with vsync (default: off on Linux and BSD, on elsewhere).
+    /// Present with vsync (default: on on macOS, off elsewhere).
     pub(crate) vsync: Switch,
     /// Keep the native Wayland backend instead of XWayland.
     #[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
