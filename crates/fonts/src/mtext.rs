@@ -93,7 +93,6 @@ pub fn plain_mtext(s: &str) -> String {
 /// A colour set inline with `\C` (ACI) or `\c` (24-bit RGB as 0xRRGGBB).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MTextColor {
-    /// 1..=255, or 256 for ByLayer (`\C256;`): the layer's colour, whatever the object's own.
     Aci(u16),
     Rgb(u32),
 }
@@ -497,8 +496,7 @@ fn parse(contents: &str, base: Fmt) -> (Vec<Atom>, Vec<Fmt>) {
                         let (a, n) = arg(&chars, i);
                         i = n;
                         if let Ok(v) = a.trim().parse::<u16>() {
-                            // 0 (ByBlock) and values past 256 (ByLayer) use the object's colour.
-                            let col = if v == 0 || v > 256 { None } else { Some(MTextColor::Aci(v)) };
+                            let col = if v == 0 || v >= 256 { None } else { Some(MTextColor::Aci(v)) };
                             derive(&mut fmts, &mut cur, &|f| f.color = col);
                         }
                     }

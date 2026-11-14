@@ -193,7 +193,7 @@ impl Formatted {
                                 'f' | 'F' => apply_font(&mut cur, &a),
                                 'H' => apply_height(&mut cur, &a, height),
                                 'C' => {
-                                    cur.color = a.trim().parse::<u16>().ok().and_then(|v| (v > 0 && v <= 256).then_some(MTextColor::Aci(v)));
+                                    cur.color = a.trim().parse::<u16>().ok().and_then(|v| (v > 0 && v < 256).then_some(MTextColor::Aci(v)));
                                 }
                                 'c' => {
                                     if let Ok(v) = a.trim().parse::<u32>() {
