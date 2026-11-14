@@ -17,36 +17,8 @@ pub use craft_docpath::Refused;
 /// relative path would depend on the working directory, and a Windows drive path names no file
 /// on other platforms.
 pub fn resolve(stored: &str, document: Option<&Path>) -> Result<PathBuf, Refused> {
-    let stored = stored.trim();
     let document = document.filter(|d| !d.as_os_str().is_empty()).map(|d| std::path::absolute(d).unwrap_or_else(|_| d.to_path_buf()));
-    let document = document_for(stored, document, &real_path);
-    craft_docpath::resolve_absolute(stored, document.as_deref())
-}
-
-/// The document path to resolve `stored` against: `document`, or where it `real`ly is when only
-/// that lets a network path on the document's own share through. A drawing opened through a
-/// mapped drive (`P:\jobs\plan.dwg`) is on a share (`\\?\UNC\server\jobs\plan.dwg`), and an xref
-/// saved as `\\server\jobs\site.dwg` beside it is followed. Other computers stay refused.
-fn document_for(stored: &str, document: Option<PathBuf>, real: &dyn Fn(&Path) -> Option<PathBuf>) -> Option<PathBuf> {
-    let doc = document.as_deref()?;
-    if craft_docpath::resolve(stored, Some(doc)) != Err(Refused::Network) {
-        return document;
-    }
-    match real(doc) {
-        Some(r) if craft_docpath::resolve(stored, Some(&r)).is_ok() => Some(r),
-        _ => document,
-    }
-}
-
-/// The path `p` really names, through links and mapped drives (Windows gives a network drive's
-/// files as `\\?\UNC\server\share\…`).
-#[cfg(not(target_arch = "wasm32"))]
-fn real_path(p: &Path) -> Option<PathBuf> {
-    std::fs::canonicalize(p).ok()
-}
-#[cfg(target_arch = "wasm32")]
-fn real_path(_: &Path) -> Option<PathBuf> {
-    None
+    craft_docpath::resolve_absolute(stored.trim(), document.as_deref())
 }
 
 #[cfg(test)]
