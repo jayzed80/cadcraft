@@ -10,7 +10,6 @@ use cadcraft_geom::{Bounds2, PolyVertex, Polyline, Vec2, point_in_polygon};
 use serde_json::{Value, json};
 
 use super::helpers::lwpoly;
-use super::machines::{SelOutcome, SelectPhase};
 use super::{CommandSpec, bad, bool_or, f64_or, point_param, points_param, size_param, str_param, targets};
 
 use crate::{Accept, EngineError, Input, Interactive, Picker, Prompt, Result, Session, Step};
@@ -27,7 +26,7 @@ pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec::new("hatch", "Hatch...", run_hatch).menu(&["Draw", "Hatch..."]).alias(&["h", "bh", "-hatch"]).params("{points?: [[x,y]] (internal points) and/or handles?: [hex] (closed objects), pattern?: \"ANSI31\" (built in, or defined by patternFile | patternText), patternFile?: path to a .pat file | patternText?: its contents (loads the patterns it defines), scale?, angle? (degrees), associative? (HPASSOC), separate? (HPSEPARATE: a hatch per point/object), origin?: [x,y] (HPORIGIN) | originMode?: \"current\"|\"bottomLeft\"|\"bottomRight\"|\"topLeft\"|\"topRight\"|\"center\" (HPORIGINMODE), style?: \"normal\"|\"outer\"|\"ignore\" (HPISLANDDETECTION)} — gaps up to HPGAPTOL close").interactive(|s| Ok(Box::new(HatchM::new(s, false)))),
         CommandSpec::new("gradient", "Gradient...", run_gradient).menu(&["Draw", "Gradient..."]).alias(&["gd"]).params("{points? and/or handles?, name?: \"LINEAR\"|\"CYLINDER\"|\"CURVED\"|\"SPHERICAL\"|\"HEMISPHERICAL\" or INV… (colours swapped), color1?, color2?, angle? (degrees), centered? (default true)}").interactive(|s| Ok(Box::new(HatchM::new(s, true)))),
-        CommandSpec::new("boundary", "Boundary...", run_boundary).menu(&["Draw", "Boundary..."]).alias(&["bo", "bpoly", "-boundary"]).params("{points: [[x,y]]}").interactive(|_| Ok(Box::new(BoundaryM::default()))),
+        CommandSpec::new("boundary", "Boundary...", run_boundary).menu(&["Draw", "Boundary..."]).alias(&["bo", "bpoly"]).params("{points: [[x,y]]}").interactive(|_| Ok(Box::new(BoundaryM { region: false }))),
         CommandSpec::new("region", "Region", run_region).menu(&["Draw", "Region"]).alias(&["reg"]).params("{handles?}"),
         CommandSpec::new("hatchedit", "Hatch Edit", edit::run_hatchedit).menu(&["Modify", "Object", "Hatch..."]).alias(&["he", "-hatchedit"]).params("{handles?, pattern?, scale?, angle?, gradient?: {name?, color1?, color2?, angle? (degrees), centered?} (makes or changes a gradient fill; `pattern` turns it back), associative?: bool (false unlinks; true links each loop to a closed object of the same shape, or to `boundary` objects), boundary?: [hex], addPoints?: [[x,y]], addBoundary?: [hex], removeLoops?: [zero-based index] (geometry edits require one hatch), style?, origin? | originMode?, separate?: true, recreate?: \"polyline\"|\"region\", associate?: bool (link to the recreated boundary)}").interactive(|s| Ok(Box::new(edit::HatchEditM::new(s)))),
         CommandSpec::new("hatchpick", "Hatch Pick", pick::run_hatchpick)
@@ -44,18 +43,15 @@ pub(super) fn outline_tol(ext: Bounds2) -> f64 {
 }
 
 /// Tessellated outlines of every visible curve in the space (hatch boundary candidates), each
-/// with the handle of the object it came from. When `only` is `Some`, only those handles are used.
-fn outlines(d: &Drawing, space: &Space, near: Option<Bounds2>, only: Option<&[Handle]>) -> (Vec<Vec<Vec2>>, Vec<Handle>) {
+/// with the handle of the object it came from.
+fn outlines(d: &Drawing, space: &Space, near: Option<Bounds2>) -> (Vec<Vec<Vec2>>, Vec<Handle>) {
     let Some(store) = d.space(space) else { return (Vec::new(), Vec::new()) };
     let ext = d.extents(space);
     let tol = outline_tol(ext);
     let mut out = Vec::new();
     let mut owners = Vec::new();
     for e in store.iter() {
-        if !d.is_visible(e)
-            || only.is_some_and(|hs| !hs.contains(&e.handle))
-            || matches!(e.kind, EntityKind::Hatch(_) | EntityKind::Text(_) | EntityKind::MText(_) | EntityKind::Dimension(_))
-        {
+        if !d.is_visible(e) || matches!(e.kind, EntityKind::Hatch(_) | EntityKind::Text(_) | EntityKind::MText(_) | EntityKind::Dimension(_)) {
             continue;
         }
         if let Some(n) = near
@@ -213,15 +209,11 @@ pub(crate) fn island_style(t: &str) -> Option<u8> {
 
 /// Boundary loops (outer + islands) around an internal point.
 pub(crate) fn loops_at(s: &Session, p: Vec2) -> Result<Vec<HatchLoop>> {
-    loops_at_in(s, p, None, true)
-}
-
-fn loops_at_in(s: &Session, p: Vec2, only: Option<&[Handle]>, islands: bool) -> Result<Vec<HatchLoop>> {
     let d = s.doc()?;
     let space = s.space();
     let ext = d.extents(&space);
     let tol = ((ext.width() + ext.height()) * 1e-9).max(1e-9);
-    let (polys, owners) = outlines(d, &space, None, only);
+    let (polys, owners) = outlines(d, &space, None);
     // A line that ends on a flattened curve (an ellipse) can stop short of its chords.
     let polys = cadcraft_geom::region::snap_ends(&polys, outline_tol(ext), tol);
     let found = cadcraft_geom::region::boundary_at_gap(&polys, p, tol, gap_tolerance(d))
@@ -230,13 +222,10 @@ fn loops_at_in(s: &Session, p: Vec2, only: Option<&[Handle]>, islands: bool) -> 
     let ob = Bounds2::from_points(outer.iter().copied());
     let sources = handles_of(&owners, &found.outer_sources);
     let mut loops = vec![HatchLoop { vertices: outer.iter().map(|q| PolyVertex::new(*q)).collect(), outer: true, sources }];
-    if !islands {
-        return Ok(loops);
-    }
     // Islands: closed objects entirely inside the outer loop that don't contain the pick point.
     if let Some(store) = d.space(&space) {
         for e in store.iter() {
-            if !d.is_visible(e) || only.is_some_and(|hs| !hs.contains(&e.handle)) {
+            if !d.is_visible(e) {
                 continue;
             }
             let eb = entity_bounds(d, e, 0);
@@ -490,15 +479,7 @@ fn run_gradient(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn boundary_at(s: &mut Session, q: Vec2) -> Result<Vec<Handle>> {
-    boundary_at_with(s, q, None, true, false)
-}
-
-fn boundary_at_with(s: &mut Session, q: Vec2, only: Option<&[Handle]>, islands: bool, region: bool) -> Result<Vec<Handle>> {
-    let loops = loops_at_in(s, q, only, islands)?;
-    if region {
-        let h = s.add_entity(EntityKind::Region(cadcraft_doc::Region { loops }))?;
-        return Ok(vec![h]);
-    }
+    let loops = loops_at(s, q)?;
     let mut out = Vec::new();
     for l in loops {
         out.push(s.add_entity(lwpoly(l.vertices, true))?);
@@ -806,28 +787,8 @@ impl Interactive for HatchM {
     }
 }
 
-/// What a -BOUNDARY / BOUNDARY Advanced options sub-prompt asks for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BoundaryAsk {
-    Advanced,
-    BoundarySet,
-    SelectSet,
-    Island,
-    ObjectType,
-}
-
 struct BoundaryM {
     region: bool,
-    islands: bool,
-    boundary_set: Option<Vec<Handle>>,
-    asking: Option<BoundaryAsk>,
-    sel: SelectPhase,
-}
-
-impl Default for BoundaryM {
-    fn default() -> Self {
-        BoundaryM { region: false, islands: true, boundary_set: None, asking: None, sel: SelectPhase::default() }
-    }
 }
 
 impl Interactive for BoundaryM {
@@ -835,122 +796,19 @@ impl Interactive for BoundaryM {
         if self.region { "REGION" } else { "BOUNDARY" }
     }
     fn prompt(&self, _s: &Session) -> Prompt {
-        match self.asking {
-            None => Prompt::new("Pick internal point", Accept::POINT).kw(&["Advanced options"]),
-            Some(BoundaryAsk::Advanced) => Prompt::new("Enter an option", Accept::TEXT).kw(&["Boundary set", "Island detection", "Object type"]),
-            Some(BoundaryAsk::BoundarySet) => {
-                let cur = if self.boundary_set.is_some() { "Current" } else { "Everything" };
-                Prompt::new("Specify candidate set for boundary", Accept::TEXT).kw(&["New", "Everything"]).default(cur)
-            }
-            Some(BoundaryAsk::SelectSet) => self.sel.prompt(),
-            Some(BoundaryAsk::Island) => {
-                Prompt::new("Do you want island detection?", Accept::TEXT).kw(&["Yes", "No"]).default(if self.islands { "Yes" } else { "No" })
-            }
-            Some(BoundaryAsk::ObjectType) => Prompt::new("Enter type of boundary object", Accept::TEXT)
-                .kw(&["Region", "Polyline"])
-                .default(if self.region { "Region" } else { "Polyline" }),
-        }
+        Prompt::new("Pick internal point", Accept::POINT)
     }
     fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
-        match self.asking {
-            None => match i {
-                Input::Point(p) => {
-                    match boundary_at_with(s, p, self.boundary_set.as_deref(), self.islands, self.region) {
-                        Ok(hs) => {
-                            let what = if self.region { "region" } else { "polyline" };
-                            s.echo(format!("BOUNDARY created {} {what}(s)", hs.len()));
-                        }
-                        Err(e) => s.echo(e.to_string()),
-                    }
-                    Ok(Step::Continue)
+        match i {
+            Input::Point(p) => {
+                match boundary_at(s, p) {
+                    Ok(hs) => s.echo(format!("BOUNDARY created {} polyline(s)", hs.len())),
+                    Err(e) => s.echo(e.to_string()),
                 }
-                Input::Keyword(k) if k == "Advanced options" => {
-                    self.asking = Some(BoundaryAsk::Advanced);
-                    Ok(Step::Continue)
-                }
-                Input::Enter => Ok(Step::Done),
-                _ => Ok(Step::Continue),
-            },
-            Some(BoundaryAsk::Advanced) => match i {
-                Input::Keyword(k) => {
-                    match k.as_str() {
-                        "Boundary set" => self.asking = Some(BoundaryAsk::BoundarySet),
-                        "Island detection" => self.asking = Some(BoundaryAsk::Island),
-                        "Object type" => self.asking = Some(BoundaryAsk::ObjectType),
-                        _ => {}
-                    }
-                    Ok(Step::Continue)
-                }
-                Input::Enter => {
-                    self.asking = None;
-                    Ok(Step::Continue)
-                }
-                _ => Ok(Step::Continue),
-            },
-            Some(BoundaryAsk::BoundarySet) => match i {
-                Input::Keyword(k) if k == "New" => {
-                    self.sel = SelectPhase::default();
-                    self.asking = Some(BoundaryAsk::SelectSet);
-                    Ok(Step::Continue)
-                }
-                Input::Keyword(k) if k == "Everything" => {
-                    self.boundary_set = None;
-                    self.asking = Some(BoundaryAsk::Advanced);
-                    Ok(Step::Continue)
-                }
-                Input::Enter => {
-                    self.asking = Some(BoundaryAsk::Advanced);
-                    Ok(Step::Continue)
-                }
-                _ => Ok(Step::Continue),
-            },
-            Some(BoundaryAsk::SelectSet) => match self.sel.feed(s, &i)? {
-                SelOutcome::More => Ok(Step::Continue),
-                SelOutcome::Done(hs) => {
-                    self.boundary_set = Some(hs);
-                    s.set_selection(Vec::new());
-                    self.asking = Some(BoundaryAsk::Advanced);
-                    Ok(Step::Continue)
-                }
-                SelOutcome::Empty => {
-                    self.asking = Some(BoundaryAsk::Advanced);
-                    Ok(Step::Continue)
-                }
-            },
-            Some(BoundaryAsk::Island) => match i {
-                Input::Keyword(k) if k == "Yes" => {
-                    self.islands = true;
-                    self.asking = Some(BoundaryAsk::Advanced);
-                    Ok(Step::Continue)
-                }
-                Input::Keyword(k) if k == "No" => {
-                    self.islands = false;
-                    self.asking = Some(BoundaryAsk::Advanced);
-                    Ok(Step::Continue)
-                }
-                Input::Enter => {
-                    self.asking = Some(BoundaryAsk::Advanced);
-                    Ok(Step::Continue)
-                }
-                _ => Ok(Step::Continue),
-            },
-            Some(BoundaryAsk::ObjectType) => match i {
-                Input::Keyword(k) if k == "Region" => {
-                    self.region = true;
-                    self.asking = Some(BoundaryAsk::Advanced);
-                    Ok(Step::Continue)
-                }
-                Input::Keyword(k) if k == "Polyline" => {
-                    self.region = false;
-                    self.asking = Some(BoundaryAsk::Advanced);
-                    Ok(Step::Continue)
-                }
-                Input::Enter => {
-                    self.asking = Some(BoundaryAsk::Advanced);
-                    Ok(Step::Continue)
-                }
-                _ => Ok(Step::Continue),
-            },
+                Ok(Step::Continue)
+            }
+            Input::Enter => Ok(Step::Done),
+            _ => Ok(Step::Continue),
         }
     }
 }
