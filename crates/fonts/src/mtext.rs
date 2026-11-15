@@ -75,14 +75,8 @@ pub fn plain_mtext(s: &str) -> String {
                         }
                         i = j + 1;
                     }
-                    // A trailing lone backslash is dropped.
-                    _ if chars.get(i + 1).is_none() => i += 1,
-                    // An unknown code or a malformed `\U+` / `\M+` is shown as typed, as AutoCAD
-                    // shows it: keep the backslash and read on from the code.
-                    _ => {
-                        out.push('\\');
-                        i += 1;
-                    }
+                    // An unknown code has no argument: drop the backslash and the code only.
+                    _ => i += 2,
                 }
             }
             '{' | '}' => i += 1,
@@ -259,7 +253,7 @@ fn push_literal(out: &mut String, c: char) {
 
 /// Decode `\U+hhhh` (one UTF-16 unit; a surrogate pair gives one character, a lone surrogate
 /// U+FFFD) and `\M+nhhhh` (double-byte East Asian characters) to the characters they stand
-/// for. Malformed escapes are left for the tokenizers, which show them as typed.
+/// for. Malformed escapes are left for the tokenizers, which drop the backslash and the code.
 /// An escaped backslash (`\\U+0041`) is not an escape.
 pub(crate) fn unescape_codes(s: &str) -> std::borrow::Cow<'_, str> {
     if !s.contains("\\U+") && !s.contains("\\M+") {
@@ -525,15 +519,8 @@ fn parse(contents: &str, base: Fmt) -> (Vec<Atom>, Vec<Fmt>) {
                         let (_, n) = arg(&chars, i);
                         i = n;
                     }
-                    // An unknown code or a malformed `\U+` / `\M+` is shown as typed, as AutoCAD
-                    // shows it: keep the backslash and read on from the code. A trailing lone
-                    // backslash is dropped.
-                    _ => {
-                        if chars.get(i - 1).is_some() {
-                            push_char(&mut word, '\\', cur);
-                            i -= 1;
-                        }
-                    }
+                    // An unknown code has no argument: only the backslash and the code are dropped.
+                    _ => {}
                 }
             }
             '{' => {
