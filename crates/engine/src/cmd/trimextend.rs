@@ -16,6 +16,11 @@ use crate::{Accept, EngineError, Input, Interactive, Prompt, Result, Session, St
 /// Most fence points the JSON form takes.
 const MAX_FENCE: usize = 10_000;
 
+/// The option prompts take one of their keywords, or Enter for the one in `<angle brackets>`:
+/// they ask for no free text, so a space at the command line is Enter there, as in AutoCAD
+/// (#3092). Declared as accepting text, a space was typed into the command line instead.
+const KW: Accept = Accept { point: false, number: false, text: false, select: false, enter: true };
+
 /// TRIMEXTENDMODE: 1 (default) Quick, 0 Standard.
 fn quick_mode(s: &Session) -> bool {
     s.doc().map(|d| d.header.i64("TRIMEXTENDMODE", 1) != 0).unwrap_or(true)
@@ -360,7 +365,7 @@ impl Interactive for TrimM {
             Stage::Crossing(Some(_)) => Prompt::new("Specify opposite corner", Accept::POINT),
             Stage::Mode => {
                 let msg = if self.extend { "Enter an extend mode option" } else { "Enter a trim mode option" };
-                Prompt::new(msg, Accept::TEXT).kw(&["Quick", "Standard"]).default(if quick_mode(s) { "Quick" } else { "Standard" })
+                Prompt::new(msg, KW).kw(&["Quick", "Standard"]).default(if quick_mode(s) { "Quick" } else { "Standard" })
             }
             Stage::Project => {
                 let cur = match proj_mode(s) {
@@ -368,9 +373,9 @@ impl Interactive for TrimM {
                     2 => "View",
                     _ => "Ucs",
                 };
-                Prompt::new("Enter a projection option", Accept::TEXT).kw(&["None", "Ucs", "View"]).default(cur)
+                Prompt::new("Enter a projection option", KW).kw(&["None", "Ucs", "View"]).default(cur)
             }
-            Stage::Edge => Prompt::new("Enter an implied edge extension mode", Accept::TEXT).kw(&["Extend", "No extend"]).default(if edge_mode(s) {
+            Stage::Edge => Prompt::new("Enter an implied edge extension mode", KW).kw(&["Extend", "No extend"]).default(if edge_mode(s) {
                 "Extend"
             } else {
                 "No extend"
