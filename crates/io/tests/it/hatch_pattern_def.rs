@@ -121,6 +121,66 @@ fn file_definition_is_drawn_instead_of_the_librarys() {
     assert!(prims(vec![]) > 100);
 }
 
+/// The pattern-line runs a DXF text's HATCH draws, as world-space segments.
+fn drawn(text: &str) -> Vec<(Vec2, Vec2)> {
+    let d = read_dxf(text.as_bytes()).expect("read");
+    let l = cadcraft_render::build(&d, &Space::Model, &cadcraft_render::Options::default());
+    l.prims
+        .iter()
+        .filter(|p| p.kind == cadcraft_render::Kind::Polyline)
+        .filter_map(|p| {
+            let pts = l.points(p);
+            Some((*pts.first()?, *pts.last()?))
+        })
+        .collect()
+}
+
+/// The same HATCH with its extrusion (groups 210/220/230) turned over. A HATCH's groups are in
+/// its OCS, so the entity then lies in the plane mirrored about the y axis: every world point
+/// is the mirror image (x negated) of the first entity's.
+fn turned_over(text: &str) -> String {
+    let mut p = pairs(text);
+    let hatch = p.iter().position(|(c, v)| *c == 0 && v == "HATCH").expect("HATCH");
+    let at = p.iter().skip(hatch).position(|(c, _)| *c == 210).map(|k| hatch + k).expect("210");
+    assert_eq!(p.get(at + 2).map(|(c, _)| *c), Some(230), "210/220/230");
+    p[at + 2].1 = "-1".to_string();
+    join(&p)
+}
+
+/// Whether `got` holds exactly the segments `want`, in any order and either direction.
+fn same_segments(got: &[(Vec2, Vec2)], want: &[(Vec2, Vec2)]) -> bool {
+    let near = |a: Vec2, b: Vec2| (a - b).len() < 1e-6;
+    if got.len() != want.len() {
+        return false;
+    }
+    let mut used = vec![false; got.len()];
+    want.iter().all(|(a, b)| {
+        let hit = got.iter().enumerate().position(|(i, (c, d))| !used[i] && ((near(*a, *c) && near(*b, *d)) || (near(*a, *d) && near(*b, *c))));
+        if let Some(i) = hit {
+            used[i] = true;
+        }
+        hit.is_some()
+    })
+}
+
+/// A HATCH whose extrusion is (0,0,-1) is the same entity in a mirrored OCS: its boundary and
+/// its pattern lines both have to be mirrored into the WCS (#3120).
+#[test]
+fn a_mirrored_hatch_draws_its_pattern_lines_mirrored() {
+    // ANSI31-like: 45° lines two apart, staggered by half a unit, with dashes.
+    let lines = vec![PatternLine { angle: 0.0, origin: (0.25, 1.0), delta: (0.5, 2.0), dashes: vec![1.0, -0.5] }];
+    let text = save(hatch("MYPAT", 1.0, 20f64.to_radians(), Vec2::ZERO, lines));
+    let plain = drawn(&text);
+    assert!(!plain.is_empty(), "the plain hatch draws its pattern");
+    // Turn the extrusion over: the world geometry must be the mirror image of `plain`.
+    let want: Vec<(Vec2, Vec2)> = plain.iter().map(|(a, b)| (Vec2::new(-a.x, a.y), Vec2::new(-b.x, b.y))).collect();
+    let got = drawn(&turned_over(&text));
+    assert!(same_segments(&got, &want), "the mirrored hatch draws {got:?}, not the mirror of {plain:?}");
+    // Saving it and reading it back draws the same (the writer's groups mirror the same way).
+    let resaved = drawn(&save(first_hatch(&turned_over(&text))));
+    assert!(same_segments(&resaved, &want), "the mirrored hatch saved and read again draws {resaved:?}");
+}
+
 #[test]
 fn hostile_pattern_definitions_are_capped() {
     let text = save(hatch("MYPAT", 1.0, 0.0, Vec2::ZERO, custom_lines()));

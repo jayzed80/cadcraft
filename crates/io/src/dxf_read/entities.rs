@@ -274,6 +274,15 @@ pub(super) fn entity_with_table_budget(kind: &str, tags: &[Tag], table_cells_lef
                     v.bulge = -v.bulge;
                 }
                 h.angle = cadcraft_geom::norm_angle(std::f64::consts::PI - h.angle);
+                // The pattern lines are in the same OCS: mirror their direction, base point and
+                // the offset's along-line stagger with it. Only the spacing across the lines
+                // keeps its sign: it is used as a distance, and the mirror numbers the lines the
+                // other way round.
+                for pl in &mut h.pattern_lines {
+                    pl.angle = -pl.angle;
+                    pl.origin.1 = -pl.origin.1;
+                    pl.delta.0 = -pl.delta.0;
+                }
             }
             k
         }
