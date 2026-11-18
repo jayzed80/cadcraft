@@ -1235,13 +1235,6 @@ pub fn shape_dir(face: &Face, s: &str, height: f64, width_factor: f64, oblique: 
             continue;
         }
         let g = glyph_or_fallback(face, c);
-        if !g.mapped
-            && let Some(adv) = crate::draw_stroke_stand_in(&mut out, c, x, h, wf, shear)
-        {
-            spans.push((x, x + adv, under, over));
-            x += adv;
-            continue;
-        }
         if !c.is_whitespace()
             && let Some(contours) = place_glyph_budgeted(&g, x, h, wf, shear, &mut points_left)
         {
@@ -1272,8 +1265,7 @@ pub fn width(face: &Face, s: &str, height: f64, width_factor: f64) -> Option<f64
             .filter(|(c, _, _)| !crate::bidi::is_format_control(*c))
             .map(|(c, _, _)| {
                 let g = glyph_or_fallback(face, *c);
-                let stand_in = if g.mapped { None } else { crate::stroke_stand_in_advance(*c, height, wf) };
-                stand_in.unwrap_or(g.advance * height / g.cap * wf)
+                g.advance * height / g.cap * wf
             })
             .sum(),
     )
