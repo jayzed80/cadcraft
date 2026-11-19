@@ -249,7 +249,14 @@ fn loops_at_in(s: &Session, p: Vec2, only: Option<&[Handle]>, islands: bool) -> 
             if !ob.contains_box(&eb) {
                 continue;
             }
-            if let Some(vs) = closed_loop(d, e) {
+            // A region's own loops are the outline it is solid on and its holes; the loop the
+            // boundary was traced along is dropped by the same-as-outer test below, so the rest
+            // of them stay islands instead of the region contributing nothing.
+            let loops_of: Vec<Vec<PolyVertex>> = match &e.kind {
+                EntityKind::Region(r) => r.loops.iter().map(|l| l.vertices.clone()).collect(),
+                _ => closed_loop(d, e).into_iter().collect(),
+            };
+            for vs in loops_of {
                 let pts = Polyline { vertices: vs.clone(), closed: true }.tessellate(tol.max(eb.width() * 1e-3));
                 let inside = pts.iter().all(|q| point_in_polygon(&outer, *q) || outer.iter().any(|o| o.near(*q, tol * 10.0)));
                 let same_as_outer = (cadcraft_geom::shoelace(&pts).abs() - cadcraft_geom::shoelace(&outer).abs()).abs() < tol.max(1e-6) * 1000.0;
@@ -502,7 +509,14 @@ fn boundary_at(s: &mut Session, q: Vec2) -> Result<Vec<Handle>> {
 fn boundary_at_with(s: &mut Session, q: Vec2, only: Option<&[Handle]>, islands: bool, region: bool) -> Result<Vec<Handle>> {
     let loops = loops_at_in(s, q, only, islands)?;
     if region {
-        let h = s.add_entity(EntityKind::Region(cadcraft_doc::Region { loops }))?;
+        // `loops_at_in` marks every loop inside the outer one an island, but a loop inside an
+        // island is solid again: only the nesting depth says which loops add area and which take
+        // it away, so a region's flags are set from it before insertion.
+        let mut r = cadcraft_doc::Region { loops };
+        if !r.renest() {
+            return Err(EngineError::Other("The boundary has too many nested loops for a region.".into()));
+        }
+        let h = s.add_entity(EntityKind::Region(r))?;
         return Ok(vec![h]);
     }
     let mut out = Vec::new();
@@ -1219,5 +1233,55 @@ mod tests {
         let d = s.doc().unwrap();
         assert_eq!(d.model.len(), 2);
         assert!(matches!(d.model.iter().last().map(|e| &e.kind), Some(EntityKind::Region(_))));
+    }
+
+    #[test]
+    fn boundary_region_nests_loops_inside_islands() {
+        // Three nested rectangles: the innermost loop sits inside an island, so it is solid
+        // again and adds its area back. Marking every inner loop an island gave 240, not 272.
+        let mut s = Session::new();
+        for (p1, p2) in [([0, 0], [20, 20]), ([4, 4], [16, 16]), ([8, 8], [12, 12])] {
+            s.execute("rectang", &json!({ "p1": p1, "p2": p2 })).unwrap();
+        }
+        s.cmdline("(command \"_.-boundary\" \"_A\" \"_O\" \"_R\" \"\" (list 2 2) \"\")").unwrap();
+        assert!(s.running.is_none(), "prompt: {}", s.prompt_text());
+        let d = s.doc().unwrap();
+        assert_eq!(d.model.len(), 4, "one region added");
+        let Some(EntityKind::Region(r)) = d.model.iter().last().map(|e| &e.kind) else {
+            panic!("expected a region");
+        };
+        assert_eq!(r.loops.len(), 3);
+        assert_eq!(r.loops.iter().map(|l| l.outer).collect::<Vec<_>>(), vec![true, false, true]);
+        assert!((r.area() - 272.0).abs() < 1e-6, "area {}", r.area());
+    }
+
+    #[test]
+    fn boundary_set_holding_only_a_region_keeps_its_holes() {
+        // A region is solid on its outer loop and open on its holes. With only that region left
+        // to trace, the hole has to come from the region's own loops: it was dropped, so the
+        // boundary came out as one filled 20x20 polyline.
+        let mut s = Session::new();
+        s.execute("rectang", &json!({ "p1": [0, 0], "p2": [20, 20] })).unwrap();
+        s.execute("circle", &json!({ "center": [10, 10], "radius": 3 })).unwrap();
+        s.cmdline("(command \"_.-boundary\" \"_A\" \"_O\" \"_R\" \"\" (list 1 1) \"\")").unwrap();
+        let d = s.doc().unwrap();
+        let Some(EntityKind::Region(r)) = d.model.iter().last().map(|e| &e.kind) else {
+            panic!("expected a region");
+        };
+        assert_eq!(r.loops.len(), 2, "outer loop and hole");
+        let region = d.model.iter().last().map(|e| e.handle).unwrap();
+        let rect = d.model.iter().next().map(|e| e.handle).unwrap();
+        let circle = d.model.iter().nth(1).map(|e| e.handle).unwrap();
+        let mut s = s;
+        s.execute("erase", &json!({ "handles": [rect.hex(), circle.hex()] })).unwrap();
+        s.set_selection(vec![region]);
+        s.cmdline("(command \"_.-boundary\" \"_A\" \"_B\" \"_N\" (ssget \"_P\") \"\" \"\" (list 1 1) \"\")").unwrap();
+        assert!(s.running.is_none(), "prompt: {}", s.prompt_text());
+        let d = s.doc().unwrap();
+        assert_eq!(d.model.len(), 3, "the region, its outer loop and its hole");
+        let outer = entity_bounds(d, d.model.iter().nth(1).unwrap(), 0);
+        let hole = entity_bounds(d, d.model.iter().nth(2).unwrap(), 0);
+        assert_eq!((outer.width(), outer.height()), (20.0, 20.0));
+        assert_eq!((hole.width(), hole.height()), (6.0, 6.0));
     }
 }
