@@ -249,7 +249,12 @@ fn loops_at_in(s: &Session, p: Vec2, only: Option<&[Handle]>, islands: bool) -> 
             if !ob.contains_box(&eb) {
                 continue;
             }
-            if let Some(vs) = closed_loop(d, e) {
+            // A Region is a boundary in its own right, so each of its loops can be an island.
+            let closed: Vec<Vec<PolyVertex>> = match &e.kind {
+                EntityKind::Region(r) => r.loops.iter().map(|l| l.vertices.clone()).collect(),
+                _ => closed_loop(d, e).into_iter().collect(),
+            };
+            for vs in closed {
                 let pts = Polyline { vertices: vs.clone(), closed: true }.tessellate(tol.max(eb.width() * 1e-3));
                 let inside = pts.iter().all(|q| point_in_polygon(&outer, *q) || outer.iter().any(|o| o.near(*q, tol * 10.0)));
                 let same_as_outer = (cadcraft_geom::shoelace(&pts).abs() - cadcraft_geom::shoelace(&outer).abs()).abs() < tol.max(1e-6) * 1000.0;
@@ -1242,5 +1247,21 @@ mod tests {
         };
         assert_eq!(r.loops.iter().map(|l| l.outer).collect::<Vec<_>>(), [true, false, true], "nesting depth sets each loop's flag");
         assert!((r.area() - 272.0).abs() < 1e-6, "area {}", r.area());
+    }
+
+    #[test]
+    fn boundary_set_holding_only_a_region_keeps_its_holes() {
+        let mut s = Session::new();
+        let a = s.execute("rectang", &json!({ "p1": [0, 0], "p2": [20, 20] })).unwrap();
+        let b = s.execute("rectang", &json!({ "p1": [7, 7], "p2": [13, 13] })).unwrap();
+        // A Region with a hole, from the two rectangles, which then go away.
+        s.cmdline("(command \"_.-boundary\" \"_A\" \"_O\" \"_R\" \"\" (list 2 2) \"\")").unwrap();
+        let hs = [a["handle"].as_str().unwrap(), b["handle"].as_str().unwrap()];
+        s.execute("erase", &json!({ "handles": hs })).unwrap();
+        assert_eq!(s.doc().unwrap().model.len(), 1, "only the region is left");
+        // A boundary set holding just the Region: its hole is a loop of the boundary too.
+        s.cmdline("(command \"_.-boundary\" \"_A\" \"_B\" \"_N\" (ssget \"_L\") \"\" \"\" (list 2 2) \"\")").unwrap();
+        assert!(s.running.is_none(), "prompt: {}", s.prompt_text());
+        assert_eq!(s.doc().unwrap().model.len(), 3, "the outer loop and its hole");
     }
 }
