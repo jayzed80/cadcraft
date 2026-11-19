@@ -502,7 +502,13 @@ fn boundary_at(s: &mut Session, q: Vec2) -> Result<Vec<Handle>> {
 fn boundary_at_with(s: &mut Session, q: Vec2, only: Option<&[Handle]>, islands: bool, region: bool) -> Result<Vec<Handle>> {
     let loops = loops_at_in(s, q, only, islands)?;
     if region {
-        let h = s.add_entity(EntityKind::Region(cadcraft_doc::Region { loops }))?;
+        // A loop inside an island is solid again, and the Region's area depends on those flags,
+        // so they come from each loop's nesting depth rather than from the island pass.
+        let mut r = cadcraft_doc::Region { loops };
+        if !r.renest() {
+            return Err(EngineError::Other("This boundary has too many nested loops to make a Region.".into()));
+        }
+        let h = s.add_entity(EntityKind::Region(r))?;
         return Ok(vec![h]);
     }
     let mut out = Vec::new();
@@ -1219,5 +1225,22 @@ mod tests {
         let d = s.doc().unwrap();
         assert_eq!(d.model.len(), 2);
         assert!(matches!(d.model.iter().last().map(|e| &e.kind), Some(EntityKind::Region(_))));
+    }
+
+    #[test]
+    fn boundary_region_nests_nested_loops() {
+        // A loop inside an island is solid again: the Region's area is 400 - 144 + 16.
+        let mut s = Session::new();
+        s.execute("rectang", &json!({ "p1": [0, 0], "p2": [20, 20] })).unwrap();
+        s.execute("rectang", &json!({ "p1": [4, 4], "p2": [16, 16] })).unwrap();
+        s.execute("rectang", &json!({ "p1": [8, 8], "p2": [12, 12] })).unwrap();
+        s.cmdline("(command \"_.-boundary\" \"_A\" \"_O\" \"_R\" \"\" (list 2 2) \"\")").unwrap();
+        assert!(s.running.is_none(), "prompt: {}", s.prompt_text());
+        let d = s.doc().unwrap();
+        let Some(EntityKind::Region(r)) = d.model.iter().last().map(|e| &e.kind) else {
+            panic!("no region created");
+        };
+        assert_eq!(r.loops.iter().map(|l| l.outer).collect::<Vec<_>>(), [true, false, true], "nesting depth sets each loop's flag");
+        assert!((r.area() - 272.0).abs() < 1e-6, "area {}", r.area());
     }
 }
